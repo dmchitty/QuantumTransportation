@@ -1,1 +1,396 @@
+#creates QUBOs using the theory introduced in thgis paper (AutoQUBO):
+#AutoQubo: Data-driven automatic QUBO generation, Alberto Moraglio, Serban Georgescu, Przemysław Sadowski
 
+import numpy as np
+import gc
+from dwave.cloud import Client
+import datetime as dt
+import math
+
+### Generic Formulation
+
+def free_objective_function(x):
+    return sum(c[e]*x[e] for e in E)
+
+#---
+
+def constraint1(x):
+    for j in range(n):
+        sum1[j]=0
+        sum2[j]=0
+    for e in E:
+        sum1[e[0]]+=x[e[0],e[1]]
+        sum2[e[1]]+=x[e[0],e[1]]
+    
+    total=(sum1[0]-sum2[0]-1)**2
+    total+=(sum1[n-1]-sum2[n-1]+1)**2
+    for j in range(1,n-1):
+        total+=(sum1[j]-sum2[j])**2
+
+    return(total)
+        
+        
+
+#---
+
+from functools import reduce
+def bin2int(y): return reduce(lambda a,b: b+2*a, y)
+
+def constraint2(x, y):
+    #g=sum(d[e]*x[e] for e in E)
+    #if (g<T):
+    #    result=0
+    result=(sum(d[e]*x[e] for e in E) + bin2int(y) - T)**2
+    #if result<0:
+    #result=result*result
+    #print(result)
+    #return math.isqrt(result)
+    #return (sum(d[e]*x[e] for e in E) + bin2int(y) - T)**2
+    #hh=sum(d[e]*x[e] for e in E)
+    #hh=0
+    #for e in g.edges:
+    #    hh=hh+(d[e])
+    #print(hh)
+    #result=0
+    #if (T-hh < result):
+    #    result = hh-T
+    return result
+
+#---
+
+def objective_function1(x, y):    
+    return free_objective_function(x) + A * constraint1(x) + B * constraint2(x, y)
+
+######################################################################################
+
+def sample_is_feasible(a_sample):
+    TestX=np.zeros((n, n), dtype=int)
+    for e in g.edges:
+        v1=e[0]
+        v2=e[1]
+        keystring = 'X['+str(v1)+']['+str(v2)+']'
+        if a_sample.sample.get(keystring):
+            TestX[v1][v2]=a_sample.sample.get(keystring)
+
+    TestY=np.zeros(ny, dtype=int)
+    for i in range(ny):
+        keystring = 'Y['+str(i)+']'
+        if a_sample.sample.get(keystring):
+            TestY[i]=a_sample.sample.get(keystring)
+            
+    sample_feasible = 1
+
+    if (constraint1(TestX)!=0): 
+        sample_feasible = 0
+    if (constraint2(TestX,TestY)!=0): 
+        sample_feasible = 0
+    del TestX
+    del TestY
+    return sample_feasible
+
+
+def sample_is_feasible2(a_sample):
+    TestX=np.zeros((n, n), dtype=int)
+    for e in g.edges:
+        v1=e[0]
+        v2=e[1]
+        keystring = 'X['+str(v1)+']['+str(v2)+']'
+        if a_sample.sample.get(keystring):
+            TestX[v1][v2]=a_sample.sample.get(keystring)
+
+    TestY=np.zeros(ny, dtype=int)
+    for i in range(ny):
+        keystring = 'Y['+str(i)+']'
+        if a_sample.sample.get(keystring):
+            TestY[i]=a_sample.sample.get(keystring)
+            
+    FirstPen=constraint1(TestX)
+    SecondPen=constraint2(TestX,TestY)
+
+    
+    del TestX
+    del TestY
+    return (FirstPen+SecondPen)
+
+
+import networkx as nx
+import matplotlib.pyplot as plt
+from networkx.generators.random_graphs import erdos_renyi_graph
+
+import time
+import random
+random.seed(10)
+
+# number of nodes
+n = 20
+sum1={}
+sum2={}
+
+p = 0.2#0.15#0.2#0.15#0.2#0.15
+g2 = erdos_renyi_graph(n, p, 1, directed=False)
+g = erdos_renyi_graph(n, p, 1, directed=True)
+print(len(g2.edges))
+
+g.clear() #create an empty graph to populate with directed edges
+c={}
+d={}
+sum_c = 0
+for e in g2.edges:
+    v1=e[0]
+    v2=e[1]
+    g.add_edge(*e) #add original edge
+    e2=(v2,v1)
+    g.add_edge(*e2) #add the reverse edge
+    
+    c[e] = 1+random.randint(0, 9)
+    c[e2]=c[e] # make sure the reverse edge has same traversal cost
+    sum_c = sum_c + c[e]
+    sum_c = sum_c + c[e]
+    
+    d[e] = (1+random.randint(0, 9))
+    #d[e] = d[e]*10
+    d[e2]=d[e] # make sure reverse edge has same delay
+    
+
+    
+print(len(g.edges))
+
+nx.draw(g, with_labels=True)
+plt.show()
+    
+# directed edges
+E = list(c.keys())
+print(len(E))
+
+#for e in E:
+#    print(e,e[0],e[1])
+#import sys
+#sys.exit()   
+    
+
+# penalty weight
+A = B = (sum(c.values()) + 1)
+
+# max delay
+T = 30 #need a way of setting this to useful value
+
+ny = int(np.ceil(np.log2(T)))
+
+print('ny', ny)
+
+#xTest = np.random.choice([0, 1], size=(n, n))
+
+#yTest = np.random.choice([0, 1], size=(ny))
+
+#print(xTest)
+#xTest[0][0]=1
+#print(xTest)
+#print(yTest)
+#print(objective_function1(xTest, yTest))
+
+#import sys
+#sys.exit()
+
+for iter in range(1):
+    wall_st = time.time()
+    weightsearch_st = time.time()
+    
+    import neal
+    from dwave.system import DWaveSampler, EmbeddingComposite, LazyFixedEmbeddingComposite
+    sa_search = neal.SimulatedAnnealingSampler()
+    #sa_search = LazyFixedEmbeddingComposite(DWaveSampler())
+    
+    # work out which weights to use for A and B using simulated annealing
+    
+    # new penalty weight search here, fixing B to 1.0 and incrementing A
+    best_feasible=-1
+    best_energy=999999999
+    from pyqubo import Array
+    Xd = Array.create('X', shape=(n, n), vartype='BINARY')
+    Yd = Array.create('Y', shape=(ny), vartype='BINARY')
+    
+    for i in range(20):
+        for j in range(1):
+            A=(i+1)*5
+            B=j+1
+
+            Hd = objective_function1(Xd, Yd)
+            model = Hd.compile()
+            bqm = model.to_bqm()
+
+            feasible_count=0
+            LocalBestEnergy=0#9999999999
+            sampleset = sa_search.sample(bqm, num_reads=100)
+            #samplesetB = sa_search.sample(bqm, annealing_time=40, num_reads=1000, label='Direct weight search')
+            #from greedy import SteepestDescentSolver
+            #solver_greedy = SteepestDescentSolver()
+            #sampleset = solver_greedy.sample(bqm, initial_states=samplesetB)
+            decoded_samples = model.decode_sampleset(sampleset)
+            for rec in decoded_samples:
+                result = sample_is_feasible(rec)
+                feasible_count=feasible_count+result
+                if (result==1):
+                    #if (rec.energy<LocalBestEnergy):
+                    #    LocalBestEnergy=rec.energy
+                    LocalBestEnergy=LocalBestEnergy+rec.energy
+                else:
+                    LocalBestEnergy=LocalBestEnergy+(sum_c/2)
+
+                #print(format(np.count_nonzero(samplesetB.record.chain_break_fraction > 0.0)/1000*100))
+
+            #print(A,B,feasible_count,LocalBestEnergy)
+            #print('N: ',LocalBestEnergy)
+            #if (feasible_count>best_feasible):
+            if ((LocalBestEnergy<best_energy) or ((LocalBestEnergy==best_energy) and (feasible_count>best_feasible))):
+                best_energy=LocalBestEnergy#best_sample.energy
+                #best_energy=total_energy
+                bestA=A
+                bestB=B
+                best_feasible=feasible_count
+                print('New best: ',best_energy, ' ', bestA, ' ', bestB, ' ', best_feasible)
+                        
+    A = bestA
+    B = bestB
+    
+    weightsearch_et = time.time()
+    weightsearch_elapsed = weightsearch_et-weightsearch_st
+    print('Weight search time:', weightsearch_elapsed, 'seconds')
+    
+    #now solve using quantum computer    
+    qubo_st = time.time()
+    
+    from pyqubo import Array
+    X = Array.create('X', shape=(n, n), vartype='BINARY')
+    Y = Array.create('Y', shape=(ny), vartype='BINARY')
+    H = objective_function1(X, Y)
+    model = H.compile()
+    bqm = model.to_bqm()
+
+    qubo_et = time.time()
+    qubo_elapsed = qubo_et-qubo_st;
+    print('QUBO time:', qubo_elapsed, 'seconds')
+
+
+    ### Solve QUBO
+    import neal
+    #from dwave.system import LeapHybridCQMSampler
+    from dwave.system import DWaveSampler, EmbeddingComposite, LazyFixedEmbeddingComposite
+    #from dwave.system import LeapHybridCQMSampler
+    from pprint import pprint
+
+    # code to find the number of required qubits
+    #qpu = DWaveSampler()
+    #from minorminer.busclique import find_clique_embedding
+    #embedding = find_clique_embedding(bqm.variables, qpu.to_networkx_graph())  
+    #num_qubits = sum(len(chain) for chain in embedding.values())
+    #print('Num qubits:', num_qubits)
+
+    #import sys
+    #sys.exit()
+
+    ##sa = neal.SimulatedAnnealingSampler() # to solve on a Quantum Annealer change this line
+    ###sa = LazyFixedEmbeddingComposite(DWaveSampler(solver=dict(num_qubits__gt=5000)))
+
+    from dwave.system import LeapHybridSampler
+    sa = LeapHybridSampler(solver={'category': 'hybrid'})
+
+
+    SolverLoops=10
+    bestEnergy = 999999999#n*A
+    QuantumElapsed = 0
+    DecodeElapsed = 0
+    qpuRunTime = 0
+    qpuTotalAccess = 0
+    TotalFeasible = 0
+    ChainStrengthTotal = 0
+    
+    LargestPen=0
+    TotalPen=0
+    
+    for j in range(SolverLoops):
+
+        st=time.time()
+        sampleset = sa.sample(bqm)#, num_reads=1000)
+        #print('Start')
+        #sampleset_p = sa.sample(bqm, num_reads=1000, annealing_time=40, label='Shortest Path Random Graph Nodes 20')
+        #print('End')
+        #from greedy import SteepestDescentSolver
+        #solver_greedy = SteepestDescentSolver()
+        #sampleset = solver_greedy.sample(bqm, initial_states=sampleset_p)
+        decoded_samples = model.decode_sampleset(sampleset)
+        et=time.time()
+        QuantumElapsed=QuantumElapsed+et-st
+
+        ###qpuTime=sampleset_p.info["timing"]
+        ###qpuAccess=qpuTime["qpu_access_time"]
+        ###qpuTotalAccess = qpuTotalAccess + (qpuAccess/1000000)
+        
+        #qc hybrid
+        #dontuse qpuTime=sampleset.info["timing"]
+        qpuAccess=sampleset.info["qpu_access_time"]
+        qpuTotalAccess = qpuTotalAccess + (qpuAccess/1000000)
+        
+        runtime=sampleset.info["run_time"]
+        qpuRunTime = qpuRunTime + (runtime/1000000)
+        #end qc hybrid
+
+        ###ChainStrengthTotal = ChainStrengthTotal + (sum(sampleset_p.record.chain_break_fraction*100)/1000)
+
+        st=time.time()
+        feasible_count=0
+        local_energy=999999999
+        for rec in decoded_samples:
+            is_feasible = sample_is_feasible(rec)
+            
+            pen = sample_is_feasible2(rec)
+            TotalPen=TotalPen+pen
+            if (LargestPen<pen):
+                LargestPen=pen
+            
+            feasible_count = feasible_count + is_feasible
+            if (is_feasible==1):
+                if (rec.energy<local_energy):
+                    local_best=rec
+                    local_energy=rec.energy
+
+        print('Feasible count: ',feasible_count)
+
+        TotalFeasible = TotalFeasible + feasible_count
+
+        #best_sample = local_best
+        #print("Percentage of samples with breaks is {}.". \
+        #      format(np.count_nonzero(sampleset_p.record.chain_break_fraction > 0.0)/1000*100))
+        print('Run: ', j, 'Energy: ',local_energy)
+
+        if local_energy < bestEnergy:
+            bestEnergy=local_energy
+            print(j, ' Best Energy:',  bestEnergy)
+        et=time.time()
+        DecodeElapsed=DecodeElapsed+(et-st)
+
+    ###ChainStrengthTotal = ChainStrengthTotal / SolverLoops
+
+    wall_et=time.time()
+    wall_elapsed=wall_et-wall_st
+    print('Execution time:', wall_elapsed, 'seconds ', end='')
+    print('Energy:',  bestEnergy, end='\n')
+
+    with open('results.txt', 'a') as f:
+        f.write('%d ' % n)
+        f.write('%f ' % p)
+        f.write('%d ' % len(g.edges))
+        f.write('%d ' % A)
+        f.write('%d ' % B)
+        f.write('%f ' % bestEnergy)
+        f.write('%f ' % wall_elapsed)
+        f.write('%f ' % weightsearch_elapsed)
+        f.write('%f ' % qubo_elapsed)
+        f.write('%f ' % QuantumElapsed)
+        f.write('%f ' % qpuTotalAccess)
+        f.write('%f ' % DecodeElapsed)
+        f.write('%d ' % TotalFeasible)
+        f.write('%f ' % ChainStrengthTotal)
+        f.write('%d ' % TotalPen)
+        f.write('%d\n' % LargestPen)
+    f.close
+gc.collect()
